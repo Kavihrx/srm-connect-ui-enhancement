@@ -104,6 +104,12 @@ function AppShell() {
     }
   }, [currentUser, membershipGroups])
 
+  React.useEffect(() => {
+    if (activeTab === "chat" && joinedGroups.length && !selectedChatGroupId) {
+      setSelectedChatGroupId(joinedGroups[0])
+    }
+  }, [activeTab, joinedGroups, selectedChatGroupId])
+
   type DbMessage = { id: number; group_id: number; user_id: string; content: string; created_at: string }
   const messagesKey = currentUser && selectedChatGroupId ? (["messages", selectedChatGroupId] as const) : null
   const messagesFetcher = React.useCallback(async () => {
@@ -165,16 +171,29 @@ function AppShell() {
   }
 
   const handleSend = async (groupId: number) => {
-    if (!currentUser) {
-      setShowSignIn(true)
-      return
-    }
     const text = (draftsByGroup[groupId] || "").trim()
     if (!text) return
+
     // clear composer immediately
     setDraftsByGroup((d) => ({ ...d, [groupId]: "" }))
     setTypingByGroup((t) => ({ ...t, [groupId]: false }))
-    // persist
+
+    // If no user, send locally like before
+    if (!currentUser) {
+      setChats((prev) => [
+        ...prev,
+        {
+          id: Date.now(),
+          groupId,
+          user: "You",
+          message: text,
+          time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        },
+      ])
+      return
+    }
+
+    // Try to persist via Supabase; if it fails, append locally
     const supabase = createClient()
     const { error } = await supabase.from("messages").insert({
       group_id: groupId,
@@ -182,8 +201,21 @@ function AppShell() {
       content: text,
     })
     if (error) {
-      // optional: restore draft on failure
-      setDraftsByGroup((d) => ({ ...d, [groupId]: text }))
+      setChats((prev) => [
+        ...prev,
+        {
+          id: Date.now(),
+          groupId,
+          user: currentUser.email,
+          message: text,
+          time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        },
+      ])
+      // optional toast left intact
+      toast({
+        title: "Message sent locally",
+        description: "We couldn’t reach the server. Your message is visible to you.",
+      })
     }
   }
 
@@ -193,12 +225,9 @@ function AppShell() {
     const password = signInData.password.trim()
     if (!email || !password) return
     const supabase = createClient()
-    const { error } = await supabase.signInWithPassword({
+    const { error } = await supabase.auth.signInWithPassword({
       email,
       password,
-      options: {
-        emailRedirectTo: process.env.NEXT_PUBLIC_DEV_SUPABASE_REDIRECT_URL || `${window.location.origin}/protected`,
-      },
     })
     if (error) {
       setAuthError(error.message)
@@ -221,7 +250,7 @@ function AppShell() {
     const password = signUpData.password.trim()
     if (!email || !password) return
     const supabase = createClient()
-    const { error } = await supabase.signUp({
+    const { error } = await supabase.auth.signUp({
       email,
       password,
       options: {
@@ -237,18 +266,27 @@ function AppShell() {
   }
 
   const messagesToShow = React.useMemo(() => {
-    if (currentUser && dbMessages && selectedChatGroupId) {
-      return dbMessages.map((m) => ({
-        id: m.id,
-        groupId: m.group_id,
-        user: m.user_id === currentUser.id ? currentUser.email : "Member",
-        message: m.content,
-        time: new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-      }))
-    }
-    // fallback to local in-memory messages
-    return chats.filter((m) => m.groupId === selectedChatGroupId).map((m) => ({ ...m }))
-  }, [currentUser, dbMessages, selectedChatGroupId, chats])
+    const localMsgs =
+      selectedChatGroupId != null
+        ? chats
+            .filter((m) => m.groupId === selectedChatGroupId)
+            .map((m) => ({ ...m })) // shape already matches render needs
+        : []
+
+    const dbMsgs =
+      dbMessages && selectedChatGroupId != null
+        ? dbMessages.map((m) => ({
+            id: m.id,
+            groupId: m.group_id,
+            user: currentUser && m.user_id === currentUser.id ? currentUser.email : "Member",
+            message: m.content,
+            time: new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          }))
+        : []
+
+    // Merge DB and local; DB first (older) then local (newest), approximating chronological order
+    return [...dbMsgs, ...localMsgs]
+  }, [dbMessages, selectedChatGroupId, chats, currentUser])
 
   return (
     <div className="min-h-screen bg-background">
@@ -879,6 +917,9 @@ function AppShell() {
                         className="min-h-[44px]"
                       />
                       <Button
+                        disabled={
+                          !selectedChatGroupId || !((draftsByGroup[selectedChatGroupId || -1] || "").trim().length > 0)
+                        }
                         onClick={() => {
                           if (selectedChatGroupId) handleSend(selectedChatGroupId)
                         }}
