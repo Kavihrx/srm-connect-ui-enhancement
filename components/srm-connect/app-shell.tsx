@@ -21,8 +21,9 @@ import {
 } from "@/lib/srm-data"
 import { createClient } from "@/lib/supabase/client"
 import { useToast } from "@/hooks/use-toast"
+import useSWR from "swr"
 
-type User = { email: string }
+type User = { email: string; id: string }
 
 function AppShell() {
   const [activeTab, setActiveTab] = React.useState("home")
@@ -34,7 +35,8 @@ function AppShell() {
   const [selectedChatGroupId, setSelectedChatGroupId] = React.useState<number | null>(null)
   const [draftsByGroup, setDraftsByGroup] = React.useState<Record<number, string>>({})
   const [typingByGroup, setTypingByGroup] = React.useState<Record<number, boolean>>({})
-  const [newMessage, setNewMessage] = React.useState("")
+  // remove unused newMessage (Supabase path uses draftsByGroup)
+  // const [newMessage, setNewMessage] = React.useState("")
 
   // dialogs
   const [showSignUp, setShowSignUp] = React.useState(false)
@@ -66,13 +68,14 @@ function AppShell() {
   React.useEffect(() => {
     const supabase = createClient()
     supabase.auth.getUser().then(({ data }) => {
-      if (data.user?.email) setCurrentUser({ email: data.user.email })
+      if (data.user?.email && data.user?.id) setCurrentUser({ email: data.user.email, id: data.user.id })
     })
     const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user?.email) {
-        setCurrentUser({ email: session.user.email })
+      if (session?.user?.email && session.user.id) {
+        setCurrentUser({ email: session.user.email, id: session.user.id })
       } else {
         setCurrentUser(null)
+        // keep local joinedGroups if any; Supabase hooks below will null out when user logs out
       }
     })
     return () => {
@@ -80,58 +83,108 @@ function AppShell() {
     }
   }, [])
 
-  const handleJoinGroup = (id: number) => {
+  const membershipsKey = currentUser ? ["memberships", currentUser.id] : null
+  const membershipsFetcher = React.useCallback(async () => {
+    const supabase = createClient()
+    const { data, error } = await supabase
+      .from("memberships")
+      .select("group_id")
+      .order("joined_at", { ascending: true })
+    if (error) throw error
+    return (data ?? []).map((r: { group_id: number }) => r.group_id)
+  }, [])
+  const { data: membershipGroups, mutate: mutateMemberships } = useSWR(membershipsKey, membershipsFetcher)
+
+  React.useEffect(() => {
+    if (currentUser && membershipGroups) {
+      setJoinedGroups(membershipGroups)
+    }
+    if (!currentUser) {
+      // leave joinedGroups as local (fallback) when logged out
+    }
+  }, [currentUser, membershipGroups])
+
+  type DbMessage = { id: number; group_id: number; user_id: string; content: string; created_at: string }
+  const messagesKey = currentUser && selectedChatGroupId ? (["messages", selectedChatGroupId] as const) : null
+  const messagesFetcher = React.useCallback(async () => {
+    const supabase = createClient()
+    const { data, error } = await supabase
+      .from("messages")
+      .select("id, group_id, user_id, content, created_at")
+      .eq("group_id", selectedChatGroupId)
+      .order("created_at", { ascending: true })
+    if (error) throw error
+    return (data ?? []) as DbMessage[]
+  }, [selectedChatGroupId])
+  const { data: dbMessages, mutate: mutateMessages } = useSWR(messagesKey, messagesFetcher)
+
+  React.useEffect(() => {
+    if (!currentUser || !selectedChatGroupId) return
+    const supabase = createClient()
+    const channel = supabase
+      .channel(`messages:g${selectedChatGroupId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages",
+          filter: `group_id=eq.${selectedChatGroupId}`,
+        },
+        (payload) => {
+          const row = payload.new as DbMessage
+          mutateMessages((prev) => (prev ? [...prev, row] : [row]), { revalidate: false })
+        },
+      )
+      .subscribe()
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [currentUser, selectedChatGroupId, mutateMessages])
+
+  const handleJoinGroup = async (id: number) => {
     if (!currentUser) {
       setShowSignIn(true)
       return
     }
     if (joinedGroups.includes(id)) return
+    // optimistic UI
     setJoinedGroups((prev) => [...prev, id])
     setGroups((prev) => prev.map((g) => (g.id === id ? { ...g, members: g.members + 1 } : g)))
     setActiveTab("chat")
     setSelectedChatGroupId((prev) => prev ?? id)
+    // persist to Supabase
+    try {
+      const supabase = createClient()
+      // user_id inferred from auth; but we must pass it for policy check
+      await supabase.from("memberships").insert({ user_id: currentUser.id, group_id: id })
+      mutateMemberships && mutateMemberships()
+    } catch (e) {
+      // ignore for now; SWR will reconcile
+    }
   }
 
-  const handleSend = (groupId: number) => {
+  const handleSend = async (groupId: number) => {
     if (!currentUser) {
       setShowSignIn(true)
       return
     }
     const text = (draftsByGroup[groupId] || "").trim()
     if (!text) return
-    setChats((prev) => [
-      ...prev,
-      {
-        id: prev.length + 1,
-        groupId,
-        user: currentUser.email,
-        message: text,
-        time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-      },
-    ])
+    // clear composer immediately
     setDraftsByGroup((d) => ({ ...d, [groupId]: "" }))
     setTypingByGroup((t) => ({ ...t, [groupId]: false }))
-  }
-
-  const handleSignUp = async () => {
-    setAuthError(null)
-    const email = signUpData.email.trim()
-    const password = signUpData.password.trim()
-    if (!email || !password) return
+    // persist
     const supabase = createClient()
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        emailRedirectTo: process.env.NEXT_PUBLIC_DEV_SUPABASE_REDIRECT_URL || window.location.origin,
-      },
+    const { error } = await supabase.from("messages").insert({
+      group_id: groupId,
+      user_id: currentUser.id,
+      content: text,
     })
     if (error) {
-      setAuthError(error.message)
-      return
+      // optional: restore draft on failure
+      setDraftsByGroup((d) => ({ ...d, [groupId]: text }))
     }
-    setShowSignUp(false)
-    setSignUpData({ email: "", password: "" })
   }
 
   const handleSignIn = async () => {
@@ -140,7 +193,7 @@ function AppShell() {
     const password = signInData.password.trim()
     if (!email || !password) return
     const supabase = createClient()
-    const { error } = await supabase.auth.signInWithPassword({
+    const { error } = await supabase.signInWithPassword({
       email,
       password,
       options: {
@@ -159,8 +212,43 @@ function AppShell() {
     const supabase = createClient()
     await supabase.auth.signOut()
     setCurrentUser(null)
-    setJoinedGroups([])
+    setJoinedGroups([]) // Clear local joined groups on sign out
   }
+
+  const handleSignUp = async () => {
+    setAuthError(null)
+    const email = signUpData.email.trim()
+    const password = signUpData.password.trim()
+    if (!email || !password) return
+    const supabase = createClient()
+    const { error } = await supabase.signUp({
+      email,
+      password,
+      options: {
+        emailRedirectTo: process.env.NEXT_PUBLIC_DEV_SUPABASE_REDIRECT_URL || `${window.location.origin}/protected`,
+      },
+    })
+    if (error) {
+      setAuthError(error.message)
+      return
+    }
+    setShowSignUp(false)
+    setSignUpData({ email: "", password: "" })
+  }
+
+  const messagesToShow = React.useMemo(() => {
+    if (currentUser && dbMessages && selectedChatGroupId) {
+      return dbMessages.map((m) => ({
+        id: m.id,
+        groupId: m.group_id,
+        user: m.user_id === currentUser.id ? currentUser.email : "Member",
+        message: m.content,
+        time: new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      }))
+    }
+    // fallback to local in-memory messages
+    return chats.filter((m) => m.groupId === selectedChatGroupId).map((m) => ({ ...m }))
+  }, [currentUser, dbMessages, selectedChatGroupId, chats])
 
   return (
     <div className="min-h-screen bg-background">
@@ -738,27 +826,26 @@ function AppShell() {
                   <CardContent className="flex min-h-0 flex-1 flex-col gap-3">
                     <div id="message-scroll" className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border p-3">
                       {/* messages */}
-                      {chats
-                        .filter((m) => m.groupId === selectedChatGroupId)
-                        .map((m) => {
-                          const isSelf = currentUser?.email === m.user
-                          return (
-                            <div key={m.id} className={cn("flex", isSelf ? "justify-end" : "justify-start")}>
-                              <div
-                                className={cn(
-                                  "max-w-[80%] rounded-lg px-3 py-2 text-sm shadow-sm",
-                                  isSelf ? "bg-primary text-primary-foreground" : "bg-muted",
-                                )}
-                              >
-                                <div className="flex items-center gap-2">
-                                  <span className={cn("font-medium", isSelf && "opacity-90")}>{m.user}</span>
-                                  <span className="text-xs opacity-70">{m.time}</span>
-                                </div>
-                                <div className={cn("mt-1", isSelf && "opacity-95")}>{m.message}</div>
+                      {/* replace the messages map in the chat window to use messagesToShow */}
+                      {messagesToShow.map((m) => {
+                        const isSelf = currentUser?.email === m.user
+                        return (
+                          <div key={m.id} className={cn("flex", isSelf ? "justify-end" : "justify-start")}>
+                            <div
+                              className={cn(
+                                "max-w-[80%] rounded-lg px-3 py-2 text-sm shadow-sm",
+                                isSelf ? "bg-primary text-primary-foreground" : "bg-muted",
+                              )}
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className={cn("font-medium", isSelf && "opacity-90")}>{m.user}</span>
+                                <span className="text-xs opacity-70">{m.time}</span>
                               </div>
+                              <div className={cn("mt-1", isSelf && "opacity-95")}>{m.message}</div>
                             </div>
-                          )
-                        })}
+                          </div>
+                        )
+                      })}
 
                       {/* typing indicator */}
                       {selectedChatGroupId && typingByGroup[selectedChatGroupId] ? (
