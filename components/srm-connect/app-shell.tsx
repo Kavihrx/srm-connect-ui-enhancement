@@ -19,14 +19,14 @@ import {
   chats as initialChats,
   fresherResources,
 } from "@/lib/srm-data"
+import { createClient } from "@/lib/supabase/client"
 
-type User = { username: string; password?: string }
+type User = { email: string }
 
 export function AppShell() {
   const [activeTab, setActiveTab] = React.useState("home")
   const [selectedInterest, setSelectedInterest] = React.useState<string>("")
   const [currentUser, setCurrentUser] = React.useState<User | null>(null)
-  const [users, setUsers] = React.useState<User[]>([])
   const [joinedGroups, setJoinedGroups] = React.useState<number[]>([])
   const [groups, setGroups] = React.useState(allGroups)
   const [chats, setChats] = React.useState(initialChats)
@@ -35,8 +35,8 @@ export function AppShell() {
   // dialogs
   const [showSignUp, setShowSignUp] = React.useState(false)
   const [showSignIn, setShowSignIn] = React.useState(false)
-  const [signUpData, setSignUpData] = React.useState({ username: "", password: "" })
-  const [signInData, setSignInData] = React.useState({ username: "", password: "" })
+  const [signUpData, setSignUpData] = React.useState({ email: "", password: "" })
+  const [signInData, setSignInData] = React.useState({ email: "", password: "" })
 
   const [forumOpen, setForumOpen] = React.useState<null | number>(null)
   const [eventOpen, setEventOpen] = React.useState<null | number>(null)
@@ -45,6 +45,25 @@ export function AppShell() {
 
   const [eventForm, setEventForm] = React.useState({ name: "", email: "", roll: "" })
   const [opForm, setOpForm] = React.useState({ name: "", email: "", roll: "" })
+
+  const [authError, setAuthError] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    const supabase = createClient()
+    supabase.auth.getUser().then(({ data }) => {
+      if (data.user?.email) setCurrentUser({ email: data.user.email })
+    })
+    const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user?.email) {
+        setCurrentUser({ email: session.user.email })
+      } else {
+        setCurrentUser(null)
+      }
+    })
+    return () => {
+      subscription?.subscription?.unsubscribe?.()
+    }
+  }, [])
 
   const handleJoinGroup = (id: number) => {
     if (!currentUser) {
@@ -68,7 +87,7 @@ export function AppShell() {
       {
         id: prev.length + 1,
         groupId,
-        user: currentUser.username,
+        user: currentUser.email,
         message: newMessage.trim(),
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       },
@@ -76,30 +95,51 @@ export function AppShell() {
     setNewMessage("")
   }
 
-  const handleSignUp = () => {
-    const u = signUpData.username.trim()
-    const p = signUpData.password.trim()
-    if (!u || !p) return
-    if (users.find((x) => x.username.toLowerCase() === u.toLowerCase())) return
-    setUsers((prev) => [...prev, { username: u, password: p }])
-    setCurrentUser({ username: u })
-    setSignUpData({ username: "", password: "" })
-    setShowSignUp(false)
-  }
-
-  const handleSignIn = () => {
-    const u = signInData.username.trim()
-    const p = signInData.password.trim()
-    if (!u || !p) return
-    const found = users.find((x) => x.username.toLowerCase() === u.toLowerCase() && x.password === p)
-    if (found) {
-      setCurrentUser({ username: found.username })
-      setSignInData({ username: "", password: "" })
-      setShowSignIn(false)
+  const handleSignUp = async () => {
+    setAuthError(null)
+    const email = signUpData.email.trim()
+    const password = signUpData.password.trim()
+    if (!email || !password) return
+    const supabase = createClient()
+    const { error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        emailRedirectTo: process.env.NEXT_PUBLIC_DEV_SUPABASE_REDIRECT_URL || window.location.origin,
+      },
+    })
+    if (error) {
+      setAuthError(error.message)
+      return
     }
+    setShowSignUp(false)
+    setSignUpData({ email: "", password: "" })
   }
 
-  const handleSignOut = () => {
+  const handleSignIn = async () => {
+    setAuthError(null)
+    const email = signInData.email.trim()
+    const password = signInData.password.trim()
+    if (!email || !password) return
+    const supabase = createClient()
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+      options: {
+        emailRedirectTo: process.env.NEXT_PUBLIC_DEV_SUPABASE_REDIRECT_URL || `${window.location.origin}/protected`,
+      },
+    })
+    if (error) {
+      setAuthError(error.message)
+      return
+    }
+    setShowSignIn(false)
+    setSignInData({ email: "", password: "" })
+  }
+
+  const handleSignOut = async () => {
+    const supabase = createClient()
+    await supabase.auth.signOut()
     setCurrentUser(null)
     setJoinedGroups([])
   }
@@ -114,8 +154,14 @@ export function AppShell() {
           setResourceOpen(null)
         }}
         currentUser={currentUser}
-        onSignIn={() => setShowSignIn(true)}
-        onSignUp={() => setShowSignUp(true)}
+        onSignIn={() => {
+          setAuthError(null)
+          setShowSignIn(true)
+        }}
+        onSignUp={() => {
+          setAuthError(null)
+          setShowSignUp(true)
+        }}
         onSignOut={handleSignOut}
       />
 
@@ -518,9 +564,10 @@ export function AppShell() {
           </DialogHeader>
           <div className="space-y-3">
             <Input
-              placeholder="Username"
-              value={signUpData.username}
-              onChange={(e) => setSignUpData({ ...signUpData, username: e.target.value })}
+              placeholder="Email"
+              type="email"
+              value={signUpData.email}
+              onChange={(e) => setSignUpData({ ...signUpData, email: e.target.value })}
             />
             <Input
               placeholder="Password"
@@ -528,6 +575,7 @@ export function AppShell() {
               value={signUpData.password}
               onChange={(e) => setSignUpData({ ...signUpData, password: e.target.value })}
             />
+            {authError ? <p className="text-sm text-red-500">{authError}</p> : null}
             <div className="flex justify-end">
               <Button onClick={handleSignUp}>Sign up</Button>
             </div>
@@ -542,9 +590,10 @@ export function AppShell() {
           </DialogHeader>
           <div className="space-y-3">
             <Input
-              placeholder="Username"
-              value={signInData.username}
-              onChange={(e) => setSignInData({ ...signInData, username: e.target.value })}
+              placeholder="Email"
+              type="email"
+              value={signInData.email}
+              onChange={(e) => setSignInData({ ...signInData, email: e.target.value })}
             />
             <Input
               placeholder="Password"
@@ -552,6 +601,7 @@ export function AppShell() {
               value={signInData.password}
               onChange={(e) => setSignInData({ ...signInData, password: e.target.value })}
             />
+            {authError ? <p className="text-sm text-red-500">{authError}</p> : null}
             <div className="flex justify-end">
               <Button onClick={handleSignIn}>Sign in</Button>
             </div>
@@ -604,7 +654,7 @@ function Header({
         <div className="flex items-center gap-2">
           {currentUser ? (
             <>
-              <span className="hidden text-sm text-muted-foreground sm:inline">Hi, {currentUser.username}</span>
+              <span className="hidden text-sm text-muted-foreground sm:inline">Hi, {currentUser.email}</span>
               <Button variant="secondary" onClick={onSignOut}>
                 Sign out
               </Button>
