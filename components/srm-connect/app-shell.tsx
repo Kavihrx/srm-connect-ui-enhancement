@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Tabs, TabsContent } from "@/components/ui/tabs"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -20,16 +20,20 @@ import {
   fresherResources,
 } from "@/lib/srm-data"
 import { createClient } from "@/lib/supabase/client"
+import { useToast } from "@/hooks/use-toast"
 
 type User = { email: string }
 
-export function AppShell() {
+function AppShell() {
   const [activeTab, setActiveTab] = React.useState("home")
   const [selectedInterest, setSelectedInterest] = React.useState<string>("")
   const [currentUser, setCurrentUser] = React.useState<User | null>(null)
   const [joinedGroups, setJoinedGroups] = React.useState<number[]>([])
   const [groups, setGroups] = React.useState(allGroups)
   const [chats, setChats] = React.useState(initialChats)
+  const [selectedChatGroupId, setSelectedChatGroupId] = React.useState<number | null>(null)
+  const [draftsByGroup, setDraftsByGroup] = React.useState<Record<number, string>>({})
+  const [typingByGroup, setTypingByGroup] = React.useState<Record<number, boolean>>({})
   const [newMessage, setNewMessage] = React.useState("")
 
   // dialogs
@@ -47,6 +51,17 @@ export function AppShell() {
   const [opForm, setOpForm] = React.useState({ name: "", email: "", roll: "" })
 
   const [authError, setAuthError] = React.useState<string | null>(null)
+
+  const [forum, setForum] = React.useState(forumPosts)
+  const [forumQuery, setForumQuery] = React.useState("")
+  const [forumSort, setForumSort] = React.useState<"new" | "comments" | "likes">("new")
+  const [newPostOpen, setNewPostOpen] = React.useState(false)
+  const [newPost, setNewPost] = React.useState({ title: "", content: "" })
+  const [commentDrafts, setCommentDrafts] = React.useState<Record<number, string>>({})
+  const [reactions, setReactions] = React.useState<Record<number, number>>({})
+  const [likedPosts, setLikedPosts] = React.useState<Record<number, boolean>>({})
+
+  const { toast } = useToast()
 
   React.useEffect(() => {
     const supabase = createClient()
@@ -74,6 +89,7 @@ export function AppShell() {
     setJoinedGroups((prev) => [...prev, id])
     setGroups((prev) => prev.map((g) => (g.id === id ? { ...g, members: g.members + 1 } : g)))
     setActiveTab("chat")
+    setSelectedChatGroupId((prev) => prev ?? id)
   }
 
   const handleSend = (groupId: number) => {
@@ -81,18 +97,20 @@ export function AppShell() {
       setShowSignIn(true)
       return
     }
-    if (!newMessage.trim()) return
+    const text = (draftsByGroup[groupId] || "").trim()
+    if (!text) return
     setChats((prev) => [
       ...prev,
       {
         id: prev.length + 1,
         groupId,
         user: currentUser.email,
-        message: newMessage.trim(),
+        message: text,
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       },
     ])
-    setNewMessage("")
+    setDraftsByGroup((d) => ({ ...d, [groupId]: "" }))
+    setTypingByGroup((t) => ({ ...t, [groupId]: false }))
   }
 
   const handleSignUp = async () => {
@@ -167,23 +185,6 @@ export function AppShell() {
 
       <main className="mx-auto max-w-6xl px-4 py-8 sm:py-10">
         <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-8">
-          <TabsList className="flex w-full flex-wrap justify-start gap-2 bg-muted p-1">
-            {[
-              { id: "home", label: "Home" },
-              { id: "groups", label: "Groups" },
-              { id: "forum", label: "Forum" },
-              { id: "chat", label: "Chat" },
-              { id: "announcements", label: "Announcements" },
-              { id: "events", label: "Events" },
-              { id: "opportunities", label: "Opportunities" },
-              { id: "freshers", label: "Resources" },
-            ].map((t) => (
-              <TabsTrigger key={t.id} value={t.id} className="data-[state=active]:bg-background">
-                {t.label}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-
           {/* HOME */}
           <TabsContent value="home" className="space-y-10">
             <Hero onGetStarted={() => document.getElementById("interests")?.scrollIntoView({ behavior: "smooth" })} />
@@ -285,32 +286,138 @@ export function AppShell() {
           {/* FORUM */}
           <TabsContent value="forum" className="space-y-6">
             <h2 className="text-2xl font-semibold">Public Forum</h2>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              {forumPosts.map((p) => (
-                <Card
-                  key={p.id}
-                  className="cursor-pointer transition hover:shadow-sm"
-                  onClick={() => setForumOpen(p.id)}
+
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex w-full gap-2 sm:max-w-md">
+                <Input
+                  placeholder="Search posts..."
+                  value={forumQuery}
+                  onChange={(e) => setForumQuery(e.target.value)}
+                />
+                <div className="flex gap-1">
+                  <Button variant={forumSort === "new" ? "default" : "secondary"} onClick={() => setForumSort("new")}>
+                    Newest
+                  </Button>
+                  <Button
+                    variant={forumSort === "comments" ? "default" : "secondary"}
+                    onClick={() => setForumSort("comments")}
+                  >
+                    Most commented
+                  </Button>
+                  <Button
+                    variant={forumSort === "likes" ? "default" : "secondary"}
+                    onClick={() => setForumSort("likes")}
+                  >
+                    Top liked
+                  </Button>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  onClick={() => {
+                    if (!currentUser) {
+                      setShowSignIn(true)
+                      return
+                    }
+                    setNewPostOpen(true)
+                  }}
                 >
-                  <CardHeader>
-                    <CardTitle className="text-pretty">{p.title}</CardTitle>
-                    <CardDescription className="line-clamp-2">{p.content}</CardDescription>
-                  </CardHeader>
-                  <CardContent className="flex items-center justify-between text-sm text-muted-foreground">
-                    <span>
-                      By {p.author} • {p.date}
-                    </span>
-                    <Badge variant="secondary">{p.comments.length} comments</Badge>
-                  </CardContent>
-                </Card>
-              ))}
+                  New post
+                </Button>
+              </div>
             </div>
 
-            {forumPosts.map((p) => (
+            {(() => {
+              const normalized = forumQuery.trim().toLowerCase()
+              const filtered = forum.filter(
+                (p) =>
+                  p.title.toLowerCase().includes(normalized) ||
+                  p.content.toLowerCase().includes(normalized) ||
+                  p.author.toLowerCase().includes(normalized),
+              )
+              const sorted =
+                forumSort === "new"
+                  ? [...filtered].sort((a, b) => (a.date < b.date ? 1 : -1))
+                  : forumSort === "comments"
+                    ? [...filtered].sort((a, b) => b.comments.length - a.comments.length)
+                    : [...filtered].sort((a, b) => (reactions[b.id] || 0) - (reactions[a.id] || 0))
+
+              return (
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  {sorted.map((p) => (
+                    <Card
+                      key={p.id}
+                      className="cursor-pointer transition hover:shadow-sm"
+                      onClick={() => setForumOpen(p.id)}
+                    >
+                      <CardHeader>
+                        <CardTitle className="text-pretty">{p.title}</CardTitle>
+                        <CardDescription className="line-clamp-2">{p.content}</CardDescription>
+                      </CardHeader>
+                      <CardContent className="flex items-center justify-between text-sm text-muted-foreground">
+                        <span>
+                          By {p.author} • {p.date}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <Badge variant="secondary">{p.comments.length} comments</Badge>
+                          <Button
+                            variant={likedPosts[p.id] ? "default" : "secondary"}
+                            size="sm"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setLikedPosts((prev) => {
+                                const next = !prev[p.id]
+                                setReactions((r) => {
+                                  const current = r[p.id] || 0
+                                  return {
+                                    ...r,
+                                    [p.id]: Math.max(0, current + (next ? 1 : -1)),
+                                  }
+                                })
+                                return { ...prev, [p.id]: next }
+                              })
+                            }}
+                            aria-pressed={likedPosts[p.id] ? true : false}
+                            aria-label="Like post"
+                          >
+                            ❤️ {reactions[p.id] || 0}
+                          </Button>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              )
+            })()}
+
+            {forum.map((p) => (
               <Dialog key={p.id} open={forumOpen === p.id} onOpenChange={() => setForumOpen(null)}>
                 <DialogContent className="max-w-2xl">
-                  <DialogHeader>
-                    <DialogTitle className="text-pretty">{p.title}</DialogTitle>
+                  <DialogHeader className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <DialogTitle className="text-pretty">{p.title}</DialogTitle>
+                    </div>
+                    <Button
+                      variant={likedPosts[p.id] ? "default" : "secondary"}
+                      size="sm"
+                      onClick={() => {
+                        setLikedPosts((prev) => {
+                          const next = !prev[p.id]
+                          setReactions((r) => {
+                            const current = r[p.id] || 0
+                            return {
+                              ...r,
+                              [p.id]: Math.max(0, current + (next ? 1 : -1)),
+                            }
+                          })
+                          return { ...prev, [p.id]: next }
+                        })
+                      }}
+                      aria-pressed={likedPosts[p.id] ? true : false}
+                      aria-label="Like post"
+                    >
+                      ❤️ {reactions[p.id] || 0}
+                    </Button>
                   </DialogHeader>
                   <div className="space-y-6">
                     <p className="text-muted-foreground">{p.content}</p>
@@ -325,75 +432,130 @@ export function AppShell() {
                           <div className="text-sm text-muted-foreground">{c.content}</div>
                         </div>
                       ))}
+                      <div className="mt-2 flex flex-col gap-2">
+                        <Textarea
+                          placeholder={currentUser ? "Write a comment..." : "Sign in to comment"}
+                          value={commentDrafts[p.id] || ""}
+                          onChange={(e) => setCommentDrafts((d) => ({ ...d, [p.id]: e.target.value }))}
+                        />
+                        <div className="flex justify-end gap-2">
+                          <Button
+                            variant="secondary"
+                            onClick={() => {
+                              setCommentDrafts((d) => ({ ...d, [p.id]: "" }))
+                            }}
+                          >
+                            Clear
+                          </Button>
+                          <Button
+                            onClick={() => {
+                              if (!currentUser) {
+                                setShowSignIn(true)
+                                return
+                              }
+                              const text = (commentDrafts[p.id] || "").trim()
+                              if (!text) return
+                              setForum((prev) =>
+                                prev.map((fp) =>
+                                  fp.id === p.id
+                                    ? {
+                                        ...fp,
+                                        comments: [
+                                          ...fp.comments,
+                                          {
+                                            id: fp.comments.length + 1,
+                                            user: currentUser.email,
+                                            content: text,
+                                            time: new Date().toLocaleTimeString([], {
+                                              hour: "2-digit",
+                                              minute: "2-digit",
+                                            }),
+                                          },
+                                        ],
+                                      }
+                                    : fp,
+                                ),
+                              )
+                              setCommentDrafts((d) => ({ ...d, [p.id]: "" }))
+                            }}
+                          >
+                            Add comment
+                          </Button>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </DialogContent>
               </Dialog>
             ))}
-          </TabsContent>
 
-          {/* CHAT */}
-          <TabsContent value="chat" className="space-y-6">
-            <h2 className="text-2xl font-semibold">Group Chat</h2>
-            {joinedGroups.length ? (
-              <div className="space-y-8">
-                {groups
-                  .filter((g) => joinedGroups.includes(g.id))
-                  .map((g) => (
-                    <Card key={g.id}>
-                      <CardHeader>
-                        <CardTitle>{g.name}</CardTitle>
-                        <CardDescription>{g.description}</CardDescription>
-                      </CardHeader>
-                      <CardContent>
-                        <div className="mb-3 h-56 overflow-y-auto rounded-md bg-muted p-3">
-                          {chats
-                            .filter((c) => c.groupId === g.id)
-                            .map((c) => (
-                              <div key={c.id} className="mb-2 text-sm leading-6">
-                                <span className="font-medium text-primary">{c.user}:</span>{" "}
-                                <span className="text-foreground">{c.message}</span>{" "}
-                                <span className="text-muted-foreground">({c.time})</span>
-                              </div>
-                            ))}
-                        </div>
-                        <div className="flex">
-                          <Input
-                            placeholder="Type a message..."
-                            value={newMessage}
-                            onChange={(e) => setNewMessage(e.target.value)}
-                            className="rounded-r-none"
-                          />
-                          <Button onClick={() => handleSend(g.id)} className="rounded-l-none">
-                            Send
-                          </Button>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  ))}
-              </div>
-            ) : (
-              <Card>
-                <CardContent className="py-6 text-center text-muted-foreground">
-                  Join a group to start chatting.
-                </CardContent>
-              </Card>
-            )}
+            <Dialog open={newPostOpen} onOpenChange={setNewPostOpen}>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>New post</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-3">
+                  <Input
+                    placeholder="Title"
+                    value={newPost.title}
+                    onChange={(e) => setNewPost((p) => ({ ...p, title: e.target.value }))}
+                  />
+                  <Textarea
+                    placeholder="What would you like to discuss?"
+                    value={newPost.content}
+                    onChange={(e) => setNewPost((p) => ({ ...p, content: e.target.value }))}
+                  />
+                  <div className="flex justify-end gap-2">
+                    <Button variant="secondary" onClick={() => setNewPostOpen(false)}>
+                      Cancel
+                    </Button>
+                    <Button
+                      onClick={() => {
+                        if (!currentUser) {
+                          setShowSignIn(true)
+                          return
+                        }
+                        const title = newPost.title.trim()
+                        const content = newPost.content.trim()
+                        if (!title || !content) return
+                        setForum((prev) => [
+                          {
+                            id: prev.length ? Math.max(...prev.map((x) => x.id)) + 1 : 1,
+                            title,
+                            content,
+                            author: currentUser.email,
+                            date: new Date().toISOString().slice(0, 10),
+                            comments: [],
+                          },
+                          ...prev,
+                        ])
+                        setNewPost({ title: "", content: "" })
+                        setNewPostOpen(false)
+                      }}
+                    >
+                      Post
+                    </Button>
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
           </TabsContent>
 
           {/* ANNOUNCEMENTS */}
           <TabsContent value="announcements" className="space-y-6">
             <h2 className="text-2xl font-semibold">Announcements</h2>
             <div className="space-y-4">
-              {announcements.map((a) => (
-                <Card key={a.id}>
-                  <CardHeader>
-                    <CardTitle className="text-pretty">{a.title}</CardTitle>
-                    <CardDescription>{a.date}</CardDescription>
-                  </CardHeader>
-                  <CardContent className="text-muted-foreground">{a.content}</CardContent>
-                </Card>
-              ))}
+              {[...announcements]
+                .sort((a, b) => (a.date < b.date ? 1 : -1))
+                .map((a) => (
+                  <Card key={a.id}>
+                    <CardHeader>
+                      <CardTitle className="text-pretty">{a.title}</CardTitle>
+                      <CardDescription>{a.date}</CardDescription>
+                    </CardHeader>
+                    <CardContent className="text-muted-foreground">{a.content}</CardContent>
+                  </Card>
+                ))}
             </div>
           </TabsContent>
 
@@ -449,6 +611,10 @@ export function AppShell() {
                           }
                           if (!eventForm.name || !eventForm.email || !eventForm.roll) return
                           setEventOpen(null)
+                          toast({
+                            title: "Registration successful",
+                            description: `You're registered for ${ev.title} on ${ev.date}.`,
+                          })
                           setEventForm({ name: "", email: "", roll: "" })
                         }}
                       >
@@ -521,6 +687,122 @@ export function AppShell() {
                 </DialogContent>
               </Dialog>
             ))}
+          </TabsContent>
+
+          {/* CHAT */}
+          <TabsContent value="chat" className="space-y-6">
+            <h2 className="text-2xl font-semibold">Group Chat</h2>
+            {joinedGroups.length === 0 ? (
+              <Card>
+                <CardContent className="py-6 text-muted-foreground">
+                  You haven’t joined any groups yet. Join a group from Home or Groups to start chatting.
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-[260px_1fr]">
+                {/* Sidebar: joined groups */}
+                <Card className="h-full md:sticky md:top-24">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-base">Your Groups</CardTitle>
+                    <CardDescription>Select a group to open the chat</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    {groups
+                      .filter((g) => joinedGroups.includes(g.id))
+                      .map((g) => (
+                        <button
+                          key={g.id}
+                          onClick={() => setSelectedChatGroupId(g.id)}
+                          className={cn(
+                            "w-full rounded-md border px-3 py-2 text-left text-sm transition hover:bg-accent",
+                            selectedChatGroupId === g.id && "bg-accent",
+                          )}
+                        >
+                          <div className="font-medium">{g.name}</div>
+                          <div className="text-xs text-muted-foreground">{g.interest}</div>
+                        </button>
+                      ))}
+                  </CardContent>
+                </Card>
+
+                {/* Main chat window */}
+                <Card className="flex h-[520px] flex-col">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-base">
+                      {groups.find((g) => g.id === selectedChatGroupId)?.name || "Select a group"}
+                    </CardTitle>
+                    <CardDescription className="line-clamp-2">
+                      {groups.find((g) => g.id === selectedChatGroupId)?.description}
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="flex min-h-0 flex-1 flex-col gap-3">
+                    <div id="message-scroll" className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded-md border p-3">
+                      {/* messages */}
+                      {chats
+                        .filter((m) => m.groupId === selectedChatGroupId)
+                        .map((m) => {
+                          const isSelf = currentUser?.email === m.user
+                          return (
+                            <div key={m.id} className={cn("flex", isSelf ? "justify-end" : "justify-start")}>
+                              <div
+                                className={cn(
+                                  "max-w-[80%] rounded-lg px-3 py-2 text-sm shadow-sm",
+                                  isSelf ? "bg-primary text-primary-foreground" : "bg-muted",
+                                )}
+                              >
+                                <div className="flex items-center gap-2">
+                                  <span className={cn("font-medium", isSelf && "opacity-90")}>{m.user}</span>
+                                  <span className="text-xs opacity-70">{m.time}</span>
+                                </div>
+                                <div className={cn("mt-1", isSelf && "opacity-95")}>{m.message}</div>
+                              </div>
+                            </div>
+                          )
+                        })}
+
+                      {/* typing indicator */}
+                      {selectedChatGroupId && typingByGroup[selectedChatGroupId] ? (
+                        <div className="text-xs text-muted-foreground">Someone is typing…</div>
+                      ) : null}
+                    </div>
+
+                    {/* composer */}
+                    <div className="flex items-end gap-2">
+                      <Textarea
+                        placeholder={currentUser ? "Type a message. Press Enter to send" : "Sign in to send messages"}
+                        value={selectedChatGroupId ? draftsByGroup[selectedChatGroupId] || "" : ""}
+                        onChange={(e) => {
+                          if (!selectedChatGroupId) return
+                          const text = e.target.value
+                          setDraftsByGroup((d) => ({ ...d, [selectedChatGroupId]: text }))
+                          // show typing for 1.5s after last keypress
+                          setTypingByGroup((t) => ({ ...t, [selectedChatGroupId]: true }))
+                          const gid = selectedChatGroupId
+                          window.clearTimeout((window as any).__typingTimer)
+                          ;(window as any).__typingTimer = window.setTimeout(() => {
+                            setTypingByGroup((t) => ({ ...t, [gid]: false }))
+                          }, 1500)
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !e.shiftKey) {
+                            e.preventDefault()
+                            if (selectedChatGroupId) handleSend(selectedChatGroupId)
+                          }
+                        }}
+                        className="min-h-[44px]"
+                      />
+                      <Button
+                        onClick={() => {
+                          if (selectedChatGroupId) handleSend(selectedChatGroupId)
+                        }}
+                      >
+                        Send
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            )}
           </TabsContent>
 
           {/* RESOURCES */}
@@ -713,3 +995,5 @@ function Footer() {
     </footer>
   )
 }
+
+export { AppShell }
