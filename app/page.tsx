@@ -1,11 +1,15 @@
-import { AppShell } from "@/components/srm-connect/app-shell"
-import { Enhancements } from "@/components/srm-connect/enhancements"
+import Header from "@/components/header"
+import Hero from "@/components/hero"
+import InterestsSection from "@/components/interests-section"
+import Footer from "@/components/footer"
 
-export default function Page() {
+export default function Home() {
   return (
-    <>
-      <Enhancements />
-      <AppShell />
-    </>
+    <main className="w-full min-h-screen bg-background">
+      <Header />
+      <Hero />
+      <InterestsSection />
+      <Footer />
+    </main>
   )
 }
